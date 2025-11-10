@@ -1,1 +1,1174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>海草密度分类应用 (GEE + Sentinel-2)</title>
 
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+    
+    <style>
+        /* 页面基础布局 */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* 密码遮罩层 */
+        #password-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        #password-box {
+            background: white;
+            padding: 25px 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            text-align: center;
+        }
+        #password-box h3 { margin-top: 0; }
+        #password-input { padding: 8px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; }
+        #password-button { padding: 8px 15px; font-size: 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        #password-error { color: red; font-size: 14px; margin-top: 10px; display: none; }
+
+        /* 左侧控制面板 */
+        #sidebar {
+            width: 380px;
+            height: 100%;
+            background: #f8f9fa;
+            border-right: 1px solid #ddd;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            z-index: 1000;
+        }
+        #sidebar-header {
+            padding: 15px;
+            background: #343a40;
+            color: white;
+            text-align: center;
+        }
+        #sidebar-header h2 { margin: 0; font-size: 20px; }
+        #sidebar-header p { margin: 5px 0 0; font-size: 12px; }
+        
+        /* GEE 登录状态 */
+        #auth-status {
+            padding: 10px 15px;
+            background: #fdfdea;
+            border-bottom: 1px solid #ddd;
+            text-align: center;
+        }
+        #auth-status button { width: 100%; padding: 10px; font-size: 16px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        #auth-status button:disabled { background: #ccc; }
+        #auth-status p { margin: 5px 0 0; font-weight: bold; }
+        #auth-status .logged-in { color: green; }
+        #auth-status .logged-out { color: red; }
+
+        /* 可折叠的面板 */
+        .panel-section {
+            border-bottom: 1px solid #ddd;
+        }
+        .panel-header {
+            padding: 12px 15px;
+            background: #e9ecef;
+            cursor: pointer;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .panel-header:hover { background: #dee2e6; }
+        .panel-content {
+            padding: 15px;
+            border-top: 1px solid #ddd;
+            background: white;
+            display: none; /* 默认隐藏 */
+        }
+        .panel-content.active { display: block; } /* 展开时 */
+
+        /* 表单样式 */
+        .form-group {
+            margin-bottom: 12px;
+        }
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        .form-group input[type="date"],
+        .form-group input[type="number"],
+        .form-group select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box; /* 确保 padding 不影响宽度 */
+        }
+        .form-group-inline {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .form-group-inline label { margin-bottom: 0; }
+        .form-group-inline input { width: 80px; }
+
+        /* 特征选择 */
+        .feature-list {
+            max-height: 150px;
+            overflow-y: auto;
+            border: 1px solid #eee;
+            padding: 10px;
+            background: #fdfdfd;
+        }
+        .feature-list label {
+            font-weight: normal;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+        }
+        .feature-list input { margin-right: 8px; }
+        .feature-list span {
+            font-size: 11px;
+            color: #666;
+            margin-left: 5px;
+        }
+
+        /* 运行按钮 */
+        #run-analysis {
+            width: calc(100% - 30px);
+            margin: 15px;
+            padding: 12px;
+            font-size: 16px;
+            font-weight: bold;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        #run-analysis:disabled {
+            background: #aaa;
+            cursor: not-allowed;
+        }
+        
+        /* 状态日志 */
+        #status-log {
+            flex-grow: 1; /* 占据剩余空间 */
+            background: #2b2b2b;
+            color: #f0f0f0;
+            font-family: "Courier New", Courier, monospace;
+            font-size: 12px;
+            padding: 10px;
+            overflow-y: auto;
+            white-space: pre-wrap; /* 自动换行 */
+            border-top: 1px solid #444;
+        }
+        #status-log .log-entry {
+            padding-bottom: 4px;
+            border-bottom: 1px solid #444;
+        }
+        #status-log .log-entry.error { color: #ff6b6b; }
+        #status-log .log-entry.success { color: #6bff6b; }
+
+        /* 地图容器 */
+        #map {
+            flex-grow: 1; /* 占据右侧所有空间 */
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* 结果面板样式 */
+        #results-content { background: #fdfdfd; }
+        #accuracy-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+        #accuracy-table th, #accuracy-table td {
+            border: 1px solid #ccc;
+            padding: 5px;
+            text-align: center;
+        }
+        #accuracy-table th { background: #f0f0f0; }
+        #accuracy-table td.header { background: #f0f0f0; font-weight: bold; }
+        #area-stats {
+            list-style: none;
+            padding: 0;
+            font-size: 14px;
+        }
+        #area-stats li { margin-bottom: 5px; }
+        .result-button {
+            width: 100%;
+            padding: 8px;
+            margin-top: 8px;
+            font-size: 14px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .result-button:disabled { background: #aaa; }
+
+    </style>
+</head>
+<body>
+
+    <div id="password-overlay">
+        <div id="password-box">
+            <h3>请输入访问密码</h3>
+            <input type="password" id="password-input" placeholder="Password">
+            <button id="password-button">进入</button>
+            <p id="password-error">密码错误</p>
+        </div>
+    </div>
+
+    <div id="sidebar">
+        <div id="sidebar-header">
+            <h2>海草密度分类应用</h2>
+            <p>GEE + Sentinel-2 L2A</p>
+        </div>
+
+        <div id="auth-status">
+            <button id="auth-button">使用 Google 登录</button>
+            <p id="auth-message" class="logged-out">状态：未授权</p>
+        </div>
+
+        <div class="panel-section">
+            <div class="panel-header" data-target="params-content">
+                <span>1. 参数设置</span>
+                <span class="toggle-icon">+</span>
+            </div>
+            <div class="panel-content active" id="params-content">
+                <div class="form-group">
+                    <label for="start-date">开始日期</label>
+                    <input type="date" id="start-date" value="2024-06-01">
+                </div>
+                <div class="form-group">
+                    <label for="end-date">结束日期</label>
+                    <input type="date" id="end-date" value="2024-09-30">
+                </div>
+                <div class="form-group">
+                    <label for="cloud-max">云量上限 (%)</label>
+                    <input type="number" id="cloud-max" value="15" min="0" max="100">
+                </div>
+                <div class="form-group">
+                    <label for="composite-method">合成方法</label>
+                    <select id="composite-method">
+                        <option value="median" selected>Median (中值 - 推荐)</option>
+                        <option value="mosaic">Mosaic (最新影像镶嵌)</option>
+                        <option value="firstQuartile">First Quartile (25%分位)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="resolution">分辨率 (米)</label>
+                    <select id="resolution">
+                        <option value="10" selected>10m (最高)</option>
+                        <option value="20">20m (较快)</option>
+                        <option value="60">60m (最快)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>分析区域 (AOI) 状态: <b id="aoi-status" style="color: red;">未绘制</b></label>
+                    <small>请使用地图左侧工具绘制一个多边形 (Polygon)。</small>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-section">
+            <div class="panel-header" data-target="sampling-content">
+                <span>2. 标注样本 (最重要)</span>
+                <span class="toggle-icon">+</span>
+            </div>
+            <div class="panel-content" id="sampling-content">
+                <div class="form-group">
+                    <label for="current-class">选择要标注的类别</label>
+                    <select id="current-class">
+                        <option value="3">3: 密集海草 ( >40% )</option>
+                        <option value="2">2: 中等海草 ( 10-40% )</option>
+                        <option value="1">1: 稀疏海草 ( <10% )</option>
+                        <option value="0" selected>0: 无海草 ( 水/沙 )</option>
+                        <option value="4">4: 陆地 (可选)</option>
+                    </select>
+                    <small>选择类别后，使用地图绘制工具 (多边形) 在图上标注样本。</small>
+                </div>
+                <div class="form-group">
+                    <label>样本统计 (多边形数量):</label>
+                    <ul id="sample-stats" style="font-size: 14px; padding-left: 20px;">
+                        <li>密集 (3): <span id="stats-3">0</span></li>
+                        <li>中等 (2): <span id="stats-2">0</span></li>
+                        <li>稀疏 (1): <span id="stats-1">0</span></li>
+                        <li>无 (0): <span id="stats-0">0</span></li>
+                        <li>陆地 (4): <span id="stats-4">0</span></li>
+                    </ul>
+                    <button id="clear-samples" style="width: 100%; padding: 5px; background: #dc3545; color: white; border: none; border-radius: 4px;">清空所有样本</button>
+                    <div class="form-group" style="margin-top: 10px;">
+                        <label>样本 (GeoJSON)</label>
+                        <textarea id="sample-geojson-output" rows="3" style="width: 100%; font-size: 10px;" readonly placeholder="绘制样本后，此处会显示 GeoJSON ... (可用于GEE Code Editor)"></textarea>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-section">
+            <div class="panel-header" data-target="model-content">
+                <span>3. 模型与特征</span>
+                <span class="toggle-icon">+</span>
+            </div>
+            <div class="panel-content" id="model-content">
+                <div class="form-group">
+                    <label>特征选择 (Features)</label>
+                    <div class="feature-list" id="feature-list">
+                        <label><input type="checkbox" value="Bands" checked> 原始波段 (B2-B12) <span>(基础光谱信息)</span></label>
+                        <label><input type="checkbox" value="NDVI" checked> NDVI <span>(植被指数)</span></label>
+                        <label><input type="checkbox" value="NDWI" checked> NDWI <span>(水体指数)</span></label>
+                        <label><input type="checkbox" value="BG_Ratio" checked> 蓝绿比 (B2/B3) <span>(浅水和浊度敏感)</span></label>
+                        <label><input type="checkbox" value="RedEdge" checked> 红边指数 <span>(植被健康度)</span></label>
+                        <label><input type="checkbox" value="GLCM"> GLCM 纹理 (较慢) <span>(影像粗糙度，区分斑块)</span></label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="classifier-type">分类模型</label>
+                    <select id="classifier-type">
+                        <option value="RF" selected>Random Forest (随机森林 - 推荐)</option>
+                        <option value="SVM">SVM (支持向量机)</option>
+                        <option value="CART">CART (决策树)</option>
+                    </select>
+                </div>
+                <div class="form-group-inline">
+                    <label for="train-split">训练比例 (%)</label>
+                    <input type="number" id="train-split" value="70" min="10" max="90">
+                </div>
+                <div class="form-group-inline">
+                    <label for="random-seed">随机种子</label>
+                    <input type="number" id="random-seed" value="42">
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-section">
+            <div class="panel-header" data-target="results-content">
+                <span>4. 分析结果</span>
+                <span class="toggle-icon">+</span>
+            </div>
+            <div class="panel-content" id="results-content">
+                <p id="results-placeholder">点击“开始分析”后，此处将显示精度与面积。</p>
+                <div id="results-output" style="display: none;">
+                    <h4>精度评估 (基于 30% 测试集)</h4>
+                    <p><strong>Overall Accuracy:</strong> <span id="acc-oa">N/A</span></p>
+                    <p><strong>Kappa:</strong> <span id="acc-kappa">N/A</span></p>
+                    <strong>混淆矩阵:</strong>
+                    <table id="accuracy-table">
+                        <thead>
+                            <tr>
+                                <th>(预测)</th>
+                                <th>无(0)</th>
+                                <th>稀疏(1)</th>
+                                <th>中等(2)</th>
+                                <th>密集(3)</th>
+                                <th>总计</th>
+                                <th>User Acc.</th>
+                            </tr>
+                        </thead>
+                        <tbody id="cm-body">
+                            </tbody>
+                        <tfoot>
+                            <tr>
+                                <td class="header">Prod. Acc.</td>
+                                <td id="pa-0"></td>
+                                <td id="pa-1"></td>
+                                <td id="pa-2"></td>
+                                <td id="pa-3"></td>
+                                <td colspan="2"></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+
+                    <h4>面积统计 (Hectares / 公顷)</h4>
+                    <ul id="area-stats">
+                        </ul>
+                    
+                    <hr style="margin: 15px 0;">
+                    <h4>导出结果 (到 Google Drive)</h4>
+                    <button id="export-tif" class="result-button" disabled>导出分类地图 (TIF) 到 Drive</button>
+                    <button id="export-json" class="result-button" disabled>导出矢量边界 (JSON) 到 Drive</button>
+                    <button id="export-png" class="result-button" disabled>下载地图快照 (PNG)</button>
+                    <small>导出任务会发送到 GEE，请在你的 Google Drive 中查收 (可能需几分钟)。</small>
+                </div>
+            </div>
+        </div>
+
+        <button id="run-analysis" disabled>请先授权 GEE 并绘制 AOI</button>
+
+        <div id="status-log">
+            <div class="log-entry">等待操作...</div>
+        </div>
+
+    </div>
+
+    <div id="map"></div>
+
+
+    <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/earthengine/0.1.398/earthengine-api.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+    <script type="text/javascript">
+        
+        // =======================================================================
+        // 0. 应用状态与全局变量
+        // =======================================================================
+        var map;
+        var drawControl;
+        var drawnItems; // 存储绘制的 AOI
+        var sampleFeatures = []; // 存储所有样本
+        var aoiLayer = null; // 当前 AOI 图层
+        var classificationLayer = null; // 分类结果图层
+        var compositeLayer = null; // 合成影像图层
+        
+        // (G) 密码保护
+        var correctPassword = "seagrass-2025"; // 在这里修改你的密码
+
+        // GEE 相关的全局变量
+        var geeIsAuthenticated = false;
+        var classifiedImage = null; // 存储 GEE 分类影像对象
+        var compositeImage = null; // 存储 GEE 合成影像对象
+        
+        // 类别定义 (必须与 GEE 脚本一致)
+        const CLASSES = {
+            '0': { name: '无海草 (水/沙)', color: '#808080' },
+            '1': { name: '稀疏海草 (<10%)', color: '#0000FF' },
+            '2': { name: '中等海草 (10-40%)', color: '#FFFF00' },
+            '3': { name: '密集海草 (>40%)', color: '#FF0000' },
+            '4': { name: '陆地', color: '#008000' }
+        };
+
+        // =======================================================================
+        // 1. 页面初始化
+        // =======================================================================
+        document.addEventListener('DOMContentLoaded', function() {
+            // 初始化密码检查
+            initPasswordCheck();
+
+            // 初始化地图
+            map = L.map('map').setView([36.9, 121.5], 9); // 默认定位到山东半岛
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            // (B) 初始化绘制工具
+            drawnItems = new L.FeatureGroup().addTo(map); // AOI 图层
+            var sampleLayers = new L.FeatureGroup().addTo(map); // 样本图层
+
+            drawControl = new L.Control.Draw({
+                edit: {
+                    featureGroup: drawnItems,
+                    remove: true
+                },
+                draw: {
+                    polygon: true, // AOI 和样本都用多边形
+                    polyline: false,
+                    rectangle: true,
+                    circle: false,
+                    marker: false
+                }
+            });
+            map.addControl(drawControl);
+
+            // 绑定绘制事件
+            map.on(L.Draw.Event.CREATED, function (event) {
+                var layer = event.layer;
+                var type = event.layerType;
+
+                if (type === 'polygon' || type === 'rectangle') {
+                    // 判断是绘制 AOI 还是样本
+                    var currentTab = document.querySelector('.panel-content.active').id;
+                    
+                    if (currentTab === 'sampling-content') {
+                        // 正在绘制样本
+                        addSample(layer);
+                    } else {
+                        // 正在绘制 AOI
+                        setAOI(layer);
+                    }
+                }
+            });
+
+            // 绑定编辑/删除 AOI 事件
+            map.on(L.Draw.Event.EDITED, function (e) {
+                if (aoiLayer) {
+                    setAOI(aoiLayer); // 更新 AOI
+                }
+            });
+            map.on(L.Draw.Event.DELETED, function (e) {
+                if (aoiLayer) {
+                    aoiLayer = null;
+                    document.getElementById('aoi-status').textContent = '未绘制';
+                    document.getElementById('aoi-status').style.color = 'red';
+                    updateRunButtonStatus();
+                }
+            });
+            
+            // 绑定清空样本按钮
+            document.getElementById('clear-samples').addEventListener('click', function() {
+                sampleFeatures = [];
+                sampleLayers.clearLayers(); // 从地图移除
+                updateSampleStats();
+                logToStatus('已清空所有样本。');
+            });
+
+            // 绑定 GEE 授权按钮
+            document.getElementById('auth-button').addEventListener('click', authenticateGEE);
+
+            // 绑定面板折叠事件
+            document.querySelectorAll('.panel-header').forEach(function(header) {
+                header.addEventListener('click', function() {
+                    var content = document.getElementById(this.dataset.target);
+                    var icon = this.querySelector('.toggle-icon');
+                    
+                    // (可选) 只展开一个
+                    // document.querySelectorAll('.panel-content.active').forEach(c => c.classList.remove('active'));
+                    
+                    content.classList.toggle('active');
+                    icon.textContent = content.classList.contains('active') ? '−' : '+';
+                });
+            });
+
+            // 绑定主运行按钮
+            document.getElementById('run-analysis').addEventListener('click', runAnalysisWorkflow);
+
+            // 绑定导出按钮
+            document.getElementById('export-tif').addEventListener('click', exportRaster);
+            document.getElementById('export-json').addEventListener('click', exportVector);
+            document.getElementById('export-png').addEventListener('click', exportPNG);
+            
+            // 检查 GEE 登录状态
+            checkGEELogin();
+        });
+        
+        // 1.1 密码检查
+        function initPasswordCheck() {
+            var overlay = document.getElementById('password-overlay');
+            var button = document.getElementById('password-button');
+            var input = document.getElementById('password-input');
+            var error = document.getElementById('password-error');
+
+            button.addEventListener('click', check);
+            input.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    check();
+                }
+            });
+
+            function check() {
+                if (input.value === correctPassword) {
+                    overlay.style.display = 'none';
+                } else {
+                    error.style.display = 'block';
+                }
+            }
+        }
+
+        // 1.2 GEE 授权
+        function authenticateGEE() {
+            logToStatus('正在请求 GEE 授权...');
+            ee.data.authenticateViaOauth(
+                'YOUR_CLIENT_ID', // 在实际部署中，你需要一个 Client ID
+                function() {
+                    logToStatus('GEE 授权成功。正在初始化...');
+                    ee.initialize(null, null, function() {
+                        geeIsAuthenticated = true;
+                        document.getElementById('auth-message').textContent = '状态：GEE 已授权';
+                        document.getElementById('auth-message').className = 'logged-in';
+                        document.getElementById('auth-button').textContent = '已授权';
+                        document.getElementById('auth-button').disabled = true;
+                        logToStatus('GEE 初始化完成，可以开始分析。');
+                        updateRunButtonStatus();
+                    }, function(err) {
+                        logToStatus('GEE 初始化失败: ' + err, 'error');
+                        geeIsAuthenticated = false;
+                    });
+                },
+                function(err) {
+                    logToStatus('GEE 授权失败: ' + err, 'error');
+                    geeIsAuthenticated = false;
+                },
+                null, // Extra args
+                true // Force popup
+            );
+        }
+        
+        // 1.3 检查是否已登录 (刷新页面时)
+        function checkGEELogin() {
+             ee.data.checkAuth(function(authStatus) {
+                if (authStatus.loggedIn) {
+                    logToStatus('GEE 已登录，正在初始化...');
+                     ee.initialize(null, null, function() {
+                        geeIsAuthenticated = true;
+                        document.getElementById('auth-message').textContent = '状态：GEE 已授权';
+                        document.getElementById('auth-message').className = 'logged-in';
+                        document.getElementById('auth-button').textContent = '已授权';
+                        document.getElementById('auth-button').disabled = true;
+                        logToStatus('GEE 初始化完成，可以开始分析。');
+                        updateRunButtonStatus();
+                    }, function(err) {
+                        logToStatus('GEE 初始化失败: ' + err, 'error');
+                        geeIsAuthenticated = false;
+                    });
+                } else {
+                    logToStatus('GEE 未授权。请点击上方按钮登录。', 'error');
+                    document.getElementById('auth-button').disabled = false;
+                }
+            });
+        }
+
+        // 1.4 更新主按钮状态
+        function updateRunButtonStatus() {
+            var runButton = document.getElementById('run-analysis');
+            if (geeIsAuthenticated && aoiLayer) {
+                runButton.disabled = false;
+                runButton.textContent = '开始分析与分类';
+            } else {
+                runButton.disabled = true;
+                if (!geeIsAuthenticated) {
+                    runButton.textContent = '请先授权 GEE';
+                } else if (!aoiLayer) {
+                    runButton.textContent = '请先绘制 AOI';
+                }
+            }
+        }
+
+        // =======================================================================
+        // 2. 地图交互 (AOI 与样本)
+        // =======================================================================
+
+        // (A) 设置 AOI
+        function setAOI(layer) {
+            // 每次只允许一个 AOI
+            drawnItems.clearLayers();
+            drawnItems.addLayer(layer);
+            aoiLayer = layer; // 存储 Leaflet 图层
+
+            document.getElementById('aoi-status').textContent = '已绘制';
+            document.getElementById('aoi-status').style.color = 'green';
+            logToStatus('分析区域 (AOI) 已更新。');
+            updateRunButtonStatus();
+            
+            // 飞到 AOI
+            map.fitBounds(layer.getBounds());
+        }
+
+        // (B) 添加样本
+        function addSample(layer) {
+            var classSelector = document.getElementById('current-class');
+            var classValue = classSelector.value; // 0, 1, 2, 3
+            var className = classSelector.options[classSelector.selectedIndex].text;
+            var classColor = CLASSES[classValue].color;
+
+            // 1. 在地图上显示
+            layer.setStyle({
+                color: classColor,
+                fillColor: classColor,
+                fillOpacity: 0.5
+            });
+            drawnItems.addLayer(layer); // 也添加到 drawnItems 以便编辑
+
+            // 2. 转换为 GeoJSON 并存储
+            var geojson = layer.toGeoJSON();
+            geojson.properties = {
+                'label': parseInt(classValue, 10), // GEE 需要数字
+                'className': className
+            };
+            sampleFeatures.push(geojson);
+            
+            logToStatus(`添加样本: ${className}`);
+            updateSampleStats();
+        }
+
+        // (C) 更新样本统计
+        function updateSampleStats() {
+            var stats = { '0': 0, '1': 0, '2': 0, '3': 0, '4': 0 };
+            sampleFeatures.forEach(function(feature) {
+                stats[feature.properties.label]++;
+            });
+
+            document.getElementById('stats-0').textContent = stats['0'];
+            document.getElementById('stats-1').textContent = stats['1'];
+            document.getElementById('stats-2').textContent = stats['2'];
+            document.getElementById('stats-3').textContent = stats['3'];
+            document.getElementById('stats-4').textContent = stats['4'];
+
+            // (C) 生成 GEE FeatureCollection 代码
+            if (sampleFeatures.length > 0) {
+                 var fc = {
+                    type: "FeatureCollection",
+                    features: sampleFeatures
+                };
+                document.getElementById('sample-geojson-output').value = JSON.stringify(fc, null, 2);
+            } else {
+                document.getElementById('sample-geojson-output').value = "";
+            }
+        }
+        
+        // (D) 日志打印
+        function logToStatus(message, type = 'info') {
+            var logBox = document.getElementById('status-log');
+            var entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logBox.appendChild(entry);
+            logBox.scrollTop = logBox.scrollHeight; // 自动滚动到底部
+        }
+
+        // =======================================================================
+        // 3. GEE 核心分析工作流 (在客户端运行)
+        // =======================================================================
+        function runAnalysisWorkflow() {
+            if (!geeIsAuthenticated || !aoiLayer) {
+                logToStatus('错误：GEE 未授权或未设置 AOI。', 'error');
+                return;
+            }
+            if (sampleFeatures.length === 0) {
+                 logToStatus('错误：请至少绘制一个样本多边形。', 'error');
+                return;
+            }
+
+            logToStatus('分析开始...', 'success');
+            document.getElementById('run-analysis').disabled = true;
+            document.getElementById('run-analysis').textContent = '正在处理...';
+
+            // 1. 获取所有 UI 参数
+            var params = getUIParams();
+            
+            // 2. 将 Leaflet AOI 转换为 GEE Geometry
+            var aoiGeoJSON = aoiLayer.toGeoJSON().geometry;
+            var aoi = ee.Geometry(aoiGeoJSON);
+
+            // 3. 将样本 GeoJSON 转换为 GEE FeatureCollection
+            var samplesFC = ee.FeatureCollection(sampleFeatures.map(function(f) {
+                // GeoJSON -> GEE Feature
+                return ee.Feature(ee.Geometry(f.geometry), f.properties);
+            }));
+
+            // --- 开始 GEE 异步计算 ---
+            try {
+                // (A) Sentinel-2 L2A 影像去云函数
+                function maskS2clouds(image) {
+                  var qa = image.select('QA60');
+                  var cloudBitMask = 1 << 10;
+                  var cirrusBitMask = 1 << 11;
+                  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+                      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+                  var scl = image.select('SCL');
+                  var goodWater = scl.eq(6); // SCL 6 = 水
+                  
+                  // (B) 陆海分界
+                  var landMask = scl.neq(6); // 非水即陆 (包括云、阴影等)
+                  var water = scl.eq(6);
+                  
+                  return image
+                    .updateMask(mask.and(goodWater)) // 只保留干净的水体
+                    .addBands(landMask.rename('landMask'))
+                    .addBands(water.rename('waterMask'))
+                    .divide(10000) // 反射率
+                    .copyProperties(image, ["system:time_start"]);
+                }
+
+                // (D) 特征计算函数
+                function addFeatures(image) {
+                    var bands = image.select(['B2', 'B3', 'B4', 'B5', 'B8', 'B8A', 'B11']);
+                    var features = ee.Image(bands);
+                    
+                    if (params.features.includes('NDVI')) {
+                         features = features.addBands(image.normalizedDifference(['B8', 'B4']).rename('NDVI'));
+                    }
+                    if (params.features.includes('NDWI')) {
+                         features = features.addBands(image.normalizedDifference(['B3', 'B8']).rename('NDWI'));
+                    }
+                    if (params.features.includes('BG_Ratio')) {
+                         features = features.addBands(image.select('B2').divide(image.select('B3')).rename('B2_B3_Ratio'));
+                    }
+                    if (params.features.includes('RedEdge')) {
+                         features = features.addBands(image.normalizedDifference(['B6', 'B5']).rename('NDRE1'));
+                    }
+                    if (params.features.includes('GLCM')) {
+                        // 纹理较慢
+                        var glcm = image.select('B4').glcm(ee.Kernel.square(3));
+                        features = features.addBands(glcm.select('B4_mean', 'B4_contrast', 'B4_entropy'));
+                    }
+                    return features;
+                }
+                
+                logToStatus('1. 正在检索 Sentinel-2 影像...');
+                // (A) 检索影像
+                var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                           .filterBounds(aoi)
+                           .filterDate(params.startDate, params.endDate)
+                           .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', params.cloudMax))
+                           .map(maskS2clouds);
+
+                // (A) 合成影像
+                var composite;
+                if (params.compositeMethod === 'median') {
+                    composite = s2.median();
+                } else if (params.compositeMethod === 'mosaic') {
+                    composite = s2.mosaic();
+                } else {
+                    composite = s2.reduce(ee.Reducer.firstQuartile());
+                }
+                composite = composite.clip(aoi);
+                
+                // (B) 提取浅水区掩膜
+                // 我们在 maskS2clouds 中已经只保留了 SCL=6 (水体) 的像元
+                // 这里再加一个简单的深度剔除：B2 (蓝色) > 0.02 (剔除深水)
+                var shallowWaterMask = composite.select('B2').gt(0.02);
+                
+                logToStatus('2. 正在计算特征...');
+                var compositeFeatures = addFeatures(composite);
+                
+                // (D) 获取最终使用的波段列表
+                var BANDS = [];
+                if (params.features.includes('Bands')) BANDS.push('B2', 'B3', 'B4', 'B5', 'B8', 'B8A', 'B11');
+                if (params.features.includes('NDVI')) BANDS.push('NDVI');
+                if (params.features.includes('NDWI')) BANDS.push('NDWI');
+                if (params.features.includes('BG_Ratio')) BANDS.push('B2_B3_Ratio');
+                if (params.features.includes('RedEdge')) BANDS.push('NDRE1');
+                if (params.features.includes('GLCM')) BANDS.push('B4_mean', 'B4_contrast', 'B4_entropy');
+                
+                if (BANDS.length === 0) {
+                    logToStatus('错误：请至少选择一组特征！', 'error');
+                    return;
+                }
+
+                // (E) 采样
+                logToStatus('3. 正在采样训练数据...');
+                var trainingData = compositeFeatures.select(BANDS)
+                  .sampleRegions({
+                    collection: samplesFC,
+                    properties: ['label'],
+                    scale: params.resolution
+                  });
+
+                // (E) 划分训练集和测试集
+                trainingData = trainingData.randomColumn('random', params.randomSeed);
+                var split = params.trainSplit / 100.0;
+                var trainingSet = trainingData.filter(ee.Filter.lt('random', split));
+                var testingSet = trainingData.filter(ee.Filter.gte('random', split));
+
+                // (F) 初始化分类器
+                var classifier;
+                if (params.classifierType === 'RF') {
+                    classifier = ee.Classifier.smileRandomForest(100, null, 1, 0.5, null, params.randomSeed);
+                } else if (params.classifierType === 'SVM') {
+                    classifier = ee.Classifier.libsvm({kernelType: 'RBF', gamma: 0.5, cost: 10});
+                } else {
+                    classifier = ee.Classifier.smileCart(10, 0.01);
+                }
+                
+                logToStatus('4. 正在训练模型 (' + params.classifierType + ')...');
+                var trainedClassifier = classifier.train({
+                  features: trainingSet,
+                  classProperty: 'label',
+                  inputProperties: BANDS
+                });
+
+                // (F) 对影像进行分类
+                logToStatus('5. 正在对影像进行分类...');
+                classifiedImage = compositeFeatures.select(BANDS)
+                  .classify(trainedClassifier)
+                  .updateMask(shallowWaterMask); // 只显示浅水区
+
+                // (F) 精度评估
+                logToStatus('6. 正在评估模型精度...');
+                var testAccuracy = testingSet.classify(trainedClassifier);
+                var confusionMatrix = testAccuracy.errorMatrix('label', 'classification');
+                
+                // (F) 计算面积
+                var areaImage = ee.Image.pixelArea().addBands(classifiedImage);
+                var areas = areaImage.reduceRegion({
+                  reducer: ee.Reducer.sum().group({
+                    groupField: 1, // 'classification' 波段
+                    groupName: 'label',
+                  }),
+                  geometry: aoi,
+                  scale: params.resolution,
+                  maxPixels: 1e10
+                });
+
+                // (G) 获取结果 (异步)
+                // 必须按顺序获取，所以我们嵌套回调
+                logToStatus('7. 正在获取结果到浏览器...');
+                
+                // 1. 获取混淆矩阵
+                confusionMatrix.evaluate(function(cm, error) {
+                    if (error) {
+                        logToStatus('获取混淆矩阵失败: ' + error, 'error');
+                        resetUI();
+                    } else {
+                        logToStatus('获取精度成功。');
+                        // 2. 获取面积
+                        areas.evaluate(function(areaStats, error) {
+                            if (error) {
+                                logToStatus('获取面积统计失败: ' + error, 'error');
+                                resetUI();
+                            } else {
+                                logToStatus('获取面积成功。');
+                                // 3. 获取地图可视化参数
+                                var vizParams = {min: 0, max: 4, palette: Object.values(CLASSES).map(c => c.color)};
+                                compositeImage = composite.select(['B4', 'B3', 'B2']);
+                                
+                                compositeImage.getMap(
+                                    {min: 0, max: 0.3, gamma: 1.4}, 
+                                    function(mapIdComposite, error) {
+                                    if (error) {
+                                        logToStatus('获取真彩地图失败: ' + error, 'error');
+                                        resetUI();
+                                    } else {
+                                        logToStatus('获取真彩地图成功。');
+                                        // 4. 获取分类结果地图
+                                        classifiedImage.getMap(vizParams, function(mapIdClass, error) {
+                                            if (error) {
+                                                logToStatus('获取分类地图失败: ' + error, 'error');
+                                                resetUI();
+                                            } else {
+                                                logToStatus('分析全部完成！', 'success');
+                                                // --- 所有数据都已返回，更新 UI ---
+                                                displayResults(cm, areaStats, mapIdComposite, mapIdClass);
+                                                resetUI();
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+
+            } catch (err) {
+                logToStatus('GEE 分析脚本出错: ' + err.message, 'error');
+                resetUI();
+            }
+        }
+
+        // =======================================================================
+        // 4. 结果展示与导出
+        // =======================================================================
+
+        // 4.1 获取 UI 参数
+        function getUIParams() {
+            var features = [];
+            document.querySelectorAll('#feature-list input:checked').forEach(function(el) {
+                features.push(el.value);
+            });
+            
+            return {
+                startDate: document.getElementById('start-date').value,
+                endDate: document.getElementById('end-date').value,
+                cloudMax: parseInt(document.getElementById('cloud-max').value, 10),
+                compositeMethod: document.getElementById('composite-method').value,
+                resolution: parseInt(document.getElementById('resolution').value, 10),
+                features: features,
+                classifierType: document.getElementById('classifier-type').value,
+                trainSplit: parseInt(document.getElementById('train-split').value, 10),
+                randomSeed: parseInt(document.getElementById('random-seed').value, 10)
+            };
+        }
+
+        // 4.2 重置 UI 状态
+        function resetUI() {
+            document.getElementById('run-analysis').disabled = false;
+            document.getElementById('run-analysis').textContent = '重新运行分析';
+        }
+
+        // 4.3 (F) 在前端显示结果
+        function displayResults(cm, areaStats, mapIdComposite, mapIdClass) {
+            
+            // --- 1. 显示地图 ---
+            // 移除旧图层
+            if (classificationLayer) map.removeLayer(classificationLayer);
+            if (compositeLayer) map.removeLayer(compositeLayer);
+            
+            // 添加新图层 (GEE Tile Layer)
+            var geeTileUrl = 'https://earthengine.googleapis.com/v1alpha/{mapid}/tiles/{z}/{x}/{y}';
+            
+            compositeLayer = L.tileLayer(geeTileUrl.replace('{mapid}', mapIdComposite.mapid), {
+                token: mapIdComposite.token,
+                attribution: 'Google Earth Engine (S2 Composite)'
+            }).addTo(map);
+
+            classificationLayer = L.tileLayer(geeTileUrl.replace('{mapid}', mapIdClass.mapid), {
+                token: mapIdClass.token,
+                opacity: 0.7,
+                attribution: 'Google Earth Engine (Seagrass Classification)'
+            }).addTo(map);
+
+            // (F) 添加图层控制器
+            var baseMaps = { "OpenStreetMap": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png') };
+            var overlayMaps = {
+                "真彩影像 (S2)": compositeLayer,
+                "海草分类结果": classificationLayer,
+                "我的 AOI": drawnItems
+            };
+            
+            // 移除旧的控制器（如果存在）
+            if (window.layerControl) {
+                map.removeControl(window.layerControl);
+            }
+            window.layerControl = L.control.layers(null, overlayMaps, { collapsed: false }).addTo(map);
+            
+            // --- 2. 显示精度 ---
+            document.getElementById('results-placeholder').style.display = 'none';
+            document.getElementById('results-output').style.display = 'block';
+
+            var oa = ee.ErrorMatrix(cm).accuracy();
+            var kappa = ee.ErrorMatrix(cm).kappa();
+            var pa = ee.ErrorMatrix(cm).producersAccuracy().toList(); // 按行
+            var ua = ee.ErrorMatrix(cm).consumersAccuracy().toList(); // 按列
+
+            document.getElementById('acc-oa').textContent = (oa * 100).toFixed(2) + '%';
+            document.getElementById('acc-kappa').textContent = kappa.toFixed(4);
+
+            // --- 3. 动态填充混淆矩阵 ---
+            var cmBody = document.getElementById('cm-body');
+            cmBody.innerHTML = '';
+            var cmArray = cm.array;
+            var numClasses = cmArray.length; // 假设是 4x4 或 5x5
+            
+            // 补齐到 4 类（0,1,2,3）
+            for (var i = 0; i < 4; i++) {
+                var row = document.createElement('tr');
+                row.innerHTML += `<td class="header">${CLASSES[i].name} (${i})</td>`;
+                var rowSum = 0;
+                for (var j = 0; j < 4; j++) {
+                    var val = (cmArray[i] && cmArray[i][j]) ? cmArray[i][j] : 0;
+                    row.innerHTML += `<td>${val}</td>`;
+                    rowSum += val;
+                }
+                row.innerHTML += `<td>${rowSum}</td>`; // 行总计
+                var uaVal = (ua.get(i) !== null) ? (ua.get(i).getInfo() * 100).toFixed(1) : 'N/A';
+                row.innerHTML += `<td>${uaVal}%</td>`; // User Acc.
+                cmBody.appendChild(row);
+            }
+            // 填充 PA
+            for (var k = 0; k < 4; k++) {
+                 var paVal = (pa.get(k) !== null) ? (pa.get(k).getInfo() * 100).toFixed(1) : 'N/A';
+                 document.getElementById(`pa-${k}`).textContent = `${paVal}%`;
+            }
+
+            // --- 4. 显示面积 ---
+            var areaList = document.getElementById('area-stats');
+            areaList.innerHTML = '';
+            var groups = areaStats.groups;
+            if (groups && groups.length > 0) {
+                groups.forEach(function(item) {
+                    var classInfo = CLASSES[item.label];
+                    if (classInfo) {
+                        var areaHectares = (item.sum / 10000).toFixed(2); // m^2 to hectares
+                        areaList.innerHTML += `<li><span style="color:${classInfo.color}; font-weight:bold;">■</span> ${classInfo.name}: ${areaHectares} 公顷</li>`;
+                    }
+                });
+            } else {
+                areaList.innerHTML = '<li>未计算到面积。</li>';
+            }
+            
+            // --- 5. 激活导出按钮 ---
+            document.getElementById('export-tif').disabled = false;
+            document.getElementById('export-json').disabled = false;
+            document.getElementById('export-png').disabled = false;
+        }
+
+        // 4.4 (G) 导出功能
+        function exportRaster() {
+            if (!classifiedImage || !aoiLayer) {
+                logToStatus('错误：没有可导出的分类影像。', 'error');
+                return;
+            }
+            var params = getUIParams();
+            var aoi = ee.Geometry(aoiLayer.toGeoJSON().geometry);
+            
+            var exportParams = {
+                image: classifiedImage.toFloat(), // 导出为浮点型或 Byte
+                description: 'Seagrass_Classification_TIF',
+                folder: 'GEE_Exports', // 在你 Google Drive 里的文件夹
+                fileNamePrefix: 'Shandong_Seagrass_Map',
+                region: aoi,
+                scale: params.resolution,
+                maxPixels: 1e10
+            };
+            
+            try {
+                Export.image.toDrive(exportParams);
+                logToStatus('GeoTIFF 导出任务已发送到 GEE。请检查你的 Google Drive (在 GEE_Exports 文件夹)。', 'success');
+            } catch(e) {
+                logToStatus('导出 TIF 失败: ' + e.message, 'error');
+            }
+        }
+
+        function exportVector() {
+            if (!classifiedImage || !aoiLayer) {
+                logToStatus('错误：没有可导出的分类影像。', 'error');
+                return;
+            }
+            var params = getUIParams();
+            var aoi = ee.Geometry(aoiLayer.toGeoJSON().geometry);
+
+            logToStatus('正在矢量化 (可能较慢)...');
+            var vectors = classifiedImage.reduceToVectors({
+              geometry: aoi,
+              scale: params.resolution,
+              geometryType: 'polygon',
+              eightConnected: false,
+              labelProperty: 'label',
+              maxPixels: 1e10
+            });
+            
+            var exportParams = {
+              collection: vectors,
+              description: 'Seagrass_Classification_Vectors',
+              folder: 'GEE_Exports',
+              fileNamePrefix: 'Shandong_Seagrass_Vectors',
+              fileFormat: 'GeoJSON'
+            };
+
+            try {
+                Export.table.toDrive(exportParams);
+                logToStatus('GeoJSON 导出任务已发送到 GEE。请检查你的 Google Drive。', 'success');
+            } catch(e) {
+                logToStatus('导出 JSON 失败: ' + e.message, 'error');
+            }
+        }
+
+        function exportPNG() {
+            logToStatus('正在生成地图快照...');
+            html2canvas(document.getElementById('map')).then(function(canvas) {
+                var link = document.createElement('a');
+                link.download = 'seagrass_map_snapshot.png';
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+                logToStatus('快照已下载。', 'success');
+            }).catch(function(err) {
+                logToStatus('生成快照失败: ' + err, 'error');
+            });
+        }
+
+    </script>
+</body>
+</html>
